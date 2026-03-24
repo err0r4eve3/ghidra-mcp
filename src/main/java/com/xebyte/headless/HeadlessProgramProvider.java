@@ -270,8 +270,14 @@ public class HeadlessProgramProvider implements ProgramProvider {
      *
      * @return The current project, or null if none set
      */
+    @Override
     public Project getProject() {
         return project;
+    }
+
+    @Override
+    public Program openFromProject(String path) {
+        return loadProgramFromProject(path);
     }
 
     /**
