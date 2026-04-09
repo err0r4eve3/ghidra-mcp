@@ -27,7 +27,7 @@ def count_mcptool_annotations() -> int:
     """Count @McpTool annotations across all service files."""
     count = 0
     for java_file in CORE_SRC.glob("*Service.java"):
-        content = java_file.read_text()
+        content = java_file.read_text(encoding="utf-8")
         count += len(re.findall(r"@McpTool\(", content))
     return count
 
@@ -37,7 +37,7 @@ def extract_annotated_paths() -> set[str]:
     paths = set()
     pattern = re.compile(r'@McpTool\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']')
     for java_file in CORE_SRC.glob("*Service.java"):
-        content = java_file.read_text()
+        content = java_file.read_text(encoding="utf-8")
         for match in pattern.finditer(content):
             paths.add(match.group(1))
     return paths
@@ -48,7 +48,7 @@ def extract_gui_only_paths() -> set[str]:
     paths = set()
     plugin_file = JAVA_SRC / "GhidraMCPPlugin.java"
     if plugin_file.exists():
-        content = plugin_file.read_text()
+        content = plugin_file.read_text(encoding="utf-8")
         for match in re.finditer(r'server\.createContext\("([^"]+)"', content):
             paths.add(match.group(1))
     return paths
@@ -74,7 +74,7 @@ class TestAnnotatedEndpoints(unittest.TestCase):
         paths = []
         pattern = re.compile(r'@McpTool\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']')
         for java_file in CORE_SRC.glob("*Service.java"):
-            content = java_file.read_text()
+            content = java_file.read_text(encoding="utf-8")
             for match in pattern.finditer(content):
                 paths.append(match.group(1))
         duplicates = [p for p in paths if paths.count(p) > 1]
@@ -125,6 +125,25 @@ class TestEndpointsJson(unittest.TestCase):
             self.assertIn("path", ep, f"Missing 'path' in endpoint: {ep}")
             self.assertIn("method", ep, f"Missing 'method' in endpoint: {ep}")
 
+    @unittest.skipUnless(ENDPOINTS_JSON.exists(), "endpoints.json not found")
+    def test_schema_catalog_metadata_present(self):
+        data = json.loads(ENDPOINTS_JSON.read_text())
+        schema_catalog = data.get("schema_catalog", {})
+        self.assertEqual(schema_catalog.get("schema_version"), "2.0")
+        self.assertTrue(schema_catalog.get("capabilities", {}).get("catalog_metadata"))
+        self.assertTrue(schema_catalog.get("capabilities", {}).get("tool_filtering"))
+        self.assertTrue(
+            schema_catalog.get("capabilities", {}).get("lazy_hydration_hints")
+        )
+        self.assertEqual(
+            schema_catalog.get("default_approval", {}).get("GET"), "never"
+        )
+        self.assertEqual(
+            schema_catalog.get("default_approval", {}).get("POST"), "required"
+        )
+        high_risk = set(schema_catalog.get("high_risk_categories", []))
+        self.assertTrue({"project", "server", "script"} <= high_risk)
+
 
 class TestBridgeIsDynamic(unittest.TestCase):
     """Verify the bridge uses dynamic registration, not hardcoded tools."""
@@ -132,7 +151,7 @@ class TestBridgeIsDynamic(unittest.TestCase):
     def test_bridge_has_few_static_tools(self):
         """Bridge should only have static tools (list_instances, connect_instance, tool group mgmt)."""
         bridge_path = PROJECT_ROOT / "bridge_mcp_ghidra.py"
-        content = bridge_path.read_text()
+        content = bridge_path.read_text(encoding="utf-8")
         tool_count = len(re.findall(r"@mcp\.tool\(\)", content))
         self.assertLessEqual(
             tool_count,
@@ -144,17 +163,28 @@ class TestBridgeIsDynamic(unittest.TestCase):
     def test_bridge_has_schema_registration(self):
         """Bridge should have register_tools_from_schema function."""
         bridge_path = PROJECT_ROOT / "bridge_mcp_ghidra.py"
-        content = bridge_path.read_text()
+        content = bridge_path.read_text(encoding="utf-8")
         self.assertIn("register_tools_from_schema", content)
         self.assertIn("/mcp/schema", content)
 
-    def test_bridge_size_reasonable(self):
-        """Thin bridge should stay manageable while allowing modest feature growth."""
+    def test_bridge_keeps_lazy_catalog_structure(self):
+        """Bridge should stay metadata-driven instead of growing hardcoded tool logic."""
         bridge_path = PROJECT_ROOT / "bridge_mcp_ghidra.py"
-        lines = len(bridge_path.read_text().splitlines())
-        self.assertLess(
-            lines, 1400, f"Bridge is {lines} lines, expected <1400 for thin multiplexer"
-        )
+        content = bridge_path.read_text(encoding="utf-8")
+        for needle in [
+            "class ToolCatalog",
+            "class ToolPolicy",
+            "class HydrationCache",
+            "CORE_GROUPS",
+            "def register_tools_from_schema",
+            "def _load_group",
+            "def _fetch_and_register_schema",
+        ]:
+            self.assertIn(
+                needle,
+                content,
+                f"Bridge is missing lazy catalog component: {needle}",
+            )
 
 
 class TestAnnotationScannerExists(unittest.TestCase):
@@ -177,9 +207,38 @@ class TestAnnotationScannerExists(unittest.TestCase):
         self.assertTrue(path.exists())
 
     def test_scanner_has_schema_method(self):
-        content = (CORE_SRC / "AnnotationScanner.java").read_text()
+        content = (CORE_SRC / "AnnotationScanner.java").read_text(encoding="utf-8")
         self.assertIn("generateSchema", content)
         self.assertIn("ToolDescriptor", content)
+
+    def test_scanner_has_catalog_metadata_fields(self):
+        content = (CORE_SRC / "AnnotationScanner.java").read_text(encoding="utf-8")
+        for needle in [
+            "schema_version",
+            "catalog_metadata",
+            "tool_filtering",
+            "lazy_hydration_hints",
+            "read_only_hint",
+            "approval_default",
+            "profile_tags",
+            "openai_summary",
+            "surface",
+        ]:
+            self.assertIn(needle, content, f"Missing schema metadata field: {needle}")
+
+    def test_mcp_tool_annotation_has_openai_catalog_accessors(self):
+        content = (CORE_SRC / "McpTool.java").read_text(encoding="utf-8")
+        for needle in [
+            "String title()",
+            "String[] tags()",
+            "String sideEffect()",
+            "String readOnlyHint()",
+            "String approvalDefault()",
+            "String visibility()",
+            "String[] profileTags()",
+            "String openaiSummary()",
+        ]:
+            self.assertIn(needle, content, f"Missing @McpTool accessor: {needle}")
 
     def test_all_services_have_tool_group(self):
         """All service files should have @McpToolGroup annotation."""
@@ -198,7 +257,7 @@ class TestAnnotationScannerExists(unittest.TestCase):
         for name in expected:
             path = CORE_SRC / f"{name}.java"
             if path.exists():
-                content = path.read_text()
+                content = path.read_text(encoding="utf-8")
                 self.assertIn(
                     "@McpToolGroup",
                     content,

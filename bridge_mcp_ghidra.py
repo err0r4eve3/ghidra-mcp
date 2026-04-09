@@ -26,7 +26,9 @@ import socket
 import time
 import http.client
 import inspect
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from mcp.server.fastmcp import FastMCP, Context
@@ -94,6 +96,17 @@ _active_socket: str | None = None  # UDS socket path
 _active_tcp: str | None = None  # TCP base URL (e.g. "http://127.0.0.1:8089")
 _transport_mode: str = "none"  # "uds", "tcp", or "none"
 _connected_project: str | None = None  # Project name for auto-reconnect
+
+SCHEMA_VERSION = "2.0"
+SCHEMA_CAPABILITIES = {
+    "catalog_metadata": True,
+    "tool_filtering": True,
+    "lazy_hydration_hints": True,
+}
+HIGH_RISK_CATEGORIES = {"debugger", "project", "server", "script", "process"}
+TOOL_PROFILES = {
+    "re": "Reverse engineering workflow tools",
+}
 
 
 # ==========================================================================
@@ -575,17 +588,431 @@ _TYPE_MAP = {
     "address": str,
 }
 
+STATIC_TOOL_METADATA = {
+    "list_instances": {
+        "endpoint": "/list_instances",
+        "http_method": "GET",
+        "description": "List known Ghidra instances and the active connection.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "List Instances",
+        "tags": ["discovery", "control-plane"],
+        "side_effect": "read",
+        "read_only_hint": True,
+        "approval_default": "never",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to discover running Ghidra instances.",
+        "surface": "tool",
+    },
+    "connect_instance": {
+        "endpoint": "/connect_instance",
+        "http_method": "POST",
+        "description": "Connect the bridge to a specific Ghidra instance.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "Connect Instance",
+        "tags": ["control-plane", "connection"],
+        "side_effect": "write",
+        "read_only_hint": False,
+        "approval_default": "required",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to connect the bridge to a Ghidra instance.",
+        "surface": "tool",
+    },
+    "list_tool_groups": {
+        "endpoint": "/list_tool_groups",
+        "http_method": "GET",
+        "description": "List available tool groups and their loaded status.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "List Tool Groups",
+        "tags": ["control-plane", "group-loading"],
+        "side_effect": "read",
+        "read_only_hint": True,
+        "approval_default": "never",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to inspect available tool groups before loading more tools.",
+        "surface": "tool",
+    },
+    "load_tool_group": {
+        "endpoint": "/load_tool_group",
+        "http_method": "POST",
+        "description": "Load a tool group into the visible MCP tool list.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "Load Tool Group",
+        "tags": ["control-plane", "group-loading"],
+        "side_effect": "write",
+        "read_only_hint": False,
+        "approval_default": "required",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to expose an additional tool group to the model.",
+        "surface": "tool",
+    },
+    "unload_tool_group": {
+        "endpoint": "/unload_tool_group",
+        "http_method": "POST",
+        "description": "Unload a tool group from the visible MCP tool list.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "Unload Tool Group",
+        "tags": ["control-plane", "group-loading"],
+        "side_effect": "write",
+        "read_only_hint": False,
+        "approval_default": "required",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to hide a previously loaded tool group.",
+        "surface": "tool",
+    },
+    "check_tools": {
+        "endpoint": "/check_tools",
+        "http_method": "GET",
+        "description": "Check whether specific tools are callable right now.",
+        "category": "utility",
+        "category_description": "Bridge control plane",
+        "title": "Check Tools",
+        "tags": ["control-plane", "validation"],
+        "side_effect": "read",
+        "read_only_hint": True,
+        "approval_default": "never",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to verify whether a tool is currently callable.",
+        "surface": "tool",
+    },
+    "import_file": {
+        "endpoint": "/import_file",
+        "http_method": "POST",
+        "description": "Import a binary file into the current Ghidra project.",
+        "category": "project",
+        "category_description": "Project lifecycle management",
+        "title": "Import File",
+        "tags": ["project", "import"],
+        "side_effect": "write",
+        "read_only_hint": False,
+        "approval_default": "required",
+        "visibility": "model",
+        "profile_tags": [],
+        "openai_summary": "Use this when you need to import a new file into the connected Ghidra project.",
+        "surface": "tool",
+    },
+}
+ALWAYS_VISIBLE_TOOLS = {
+    "list_instances",
+    "connect_instance",
+    "list_tool_groups",
+    "load_tool_group",
+    "unload_tool_group",
+    "check_tools",
+}
+
+
+def _normalize_method(method: str | None) -> str:
+    return (method or "GET").strip().upper()
+
+
+def _normalize_category(category: str | None) -> str:
+    return (category or "unknown").strip().lower()
+
+
+def _derive_side_effect(method: str, category: str, explicit: str | None = None) -> str:
+    if explicit:
+        return explicit.strip().lower()
+    if method == "POST":
+        return "write"
+    if category == "debugger":
+        return "read"
+    return "read"
+
+
+def _derive_read_only_hint(side_effect: str, explicit: Any = None) -> bool:
+    if explicit is not None and explicit != "":
+        if isinstance(explicit, bool):
+            return explicit
+        return str(explicit).strip().lower() == "true"
+    return side_effect == "read"
+
+
+def _derive_approval_default(
+    method: str,
+    category: str,
+    explicit: str | None = None,
+) -> str:
+    if explicit:
+        return explicit.strip().lower()
+    if category in HIGH_RISK_CATEGORIES:
+        return "required"
+    return "required" if method == "POST" else "never"
+
+
+def _derive_visibility(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit.strip().lower()
+    return "model"
+
+
+def _derive_title(path: str, explicit: str | None = None) -> str:
+    if explicit:
+        return explicit.strip()
+    words = path.lstrip("/").replace("/", " ").replace("_", " ").split()
+    return " ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _derive_tags(
+    category: str,
+    method: str,
+    side_effect: str,
+    explicit: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    values: list[str] = []
+    for value in [category, method.lower(), side_effect, *(explicit or [])]:
+        normalized = str(value).strip().lower()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    return values
+
+
+def _derive_profile_tags(
+    category: str,
+    explicit: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    values: list[str] = []
+    for value in explicit or []:
+        normalized = str(value).strip().lower()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    if not values and category not in HIGH_RISK_CATEGORIES:
+        values.append("re")
+    return values
+
+
+def _derive_openai_summary(
+    description: str,
+    title: str,
+    explicit: str | None = None,
+) -> str:
+    if explicit:
+        return explicit.strip()
+    if description:
+        return f"Use this when you need to {description[:1].lower()}{description[1:]}"
+    return f"Use this when you need {title.lower()}."
+
+
+@dataclass(frozen=True)
+class ToolCatalogEntry:
+    name: str
+    endpoint: str
+    http_method: str
+    description: str
+    category: str
+    category_description: str
+    input_schema: dict[str, Any]
+    title: str
+    tags: tuple[str, ...]
+    side_effect: str
+    read_only_hint: bool
+    approval_default: str
+    visibility: str
+    profile_tags: tuple[str, ...]
+    openai_summary: str
+    surface: str
+    origin: str = "dynamic"
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    profiles: set[str] = field(default_factory=set)
+    categories: set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
+    read_only_only: bool = False
+    approval_mode: str = "never"
+    allowlist: set[str] = field(default_factory=set)
+
+    def matches(self, entry: ToolCatalogEntry) -> bool:
+        if entry.visibility != "model":
+            return False
+        if self.allowlist and entry.name not in self.allowlist:
+            return False
+        if self.profiles and not (self.profiles & set(entry.profile_tags)):
+            return False
+        if self.categories and entry.category not in self.categories:
+            return False
+        if self.tags and not (self.tags & set(entry.tags)):
+            return False
+        if self.read_only_only and not entry.read_only_hint:
+            return False
+        if self.approval_mode == "never" and entry.approval_default != "never":
+            return False
+        if self.approval_mode == "required" and entry.approval_default != "required":
+            return False
+        return True
+
+
+@dataclass
+class ToolCatalog:
+    entries: dict[str, ToolCatalogEntry]
+    dynamic_names: set[str] = field(default_factory=set)
+    static_names: set[str] = field(default_factory=set)
+    schema_version: str = SCHEMA_VERSION
+    capabilities: dict[str, Any] = field(default_factory=lambda: dict(SCHEMA_CAPABILITIES))
+
+    @classmethod
+    def from_schema(
+        cls,
+        raw: dict,
+        static_catalog: dict[str, ToolCatalogEntry] | None = None,
+    ):
+        parsed = _parse_schema(raw)
+        entries: dict[str, ToolCatalogEntry] = {}
+        dynamic_names: set[str] = set()
+        for tool_def in parsed:
+            entry = _catalog_entry_from_tool_def(tool_def, origin="dynamic")
+            entries[entry.name] = entry
+            dynamic_names.add(entry.name)
+
+        static_names: set[str] = set()
+        if static_catalog:
+            for name, entry in static_catalog.items():
+                entries[name] = entry
+                static_names.add(name)
+
+        return cls(
+            entries=entries,
+            dynamic_names=dynamic_names,
+            static_names=static_names,
+            schema_version=raw.get("schema_version", SCHEMA_VERSION),
+            capabilities=raw.get("capabilities", dict(SCHEMA_CAPABILITIES)),
+        )
+
+    def filter(
+        self,
+        policy: ToolPolicy,
+        *,
+        include_dynamic: bool = True,
+        include_static: bool = True,
+    ) -> list[str]:
+        names: list[str] = []
+        for name in sorted(self.entries):
+            if name in self.dynamic_names and not include_dynamic:
+                continue
+            if name in self.static_names and not include_static:
+                continue
+            if policy.matches(self.entries[name]):
+                names.append(name)
+        return names
+
+
+def _catalog_entry_from_tool_def(tool_def: dict, origin: str) -> ToolCatalogEntry:
+    return ToolCatalogEntry(
+        name=tool_def["name"],
+        endpoint=tool_def["endpoint"],
+        http_method=_normalize_method(tool_def.get("http_method")),
+        description=tool_def.get("description", ""),
+        category=_normalize_category(tool_def.get("category")),
+        category_description=tool_def.get("category_description", ""),
+        input_schema=tool_def.get("input_schema", {"type": "object", "properties": {}}),
+        title=tool_def.get("title", _derive_title(tool_def["endpoint"])),
+        tags=tuple(tool_def.get("tags", [])),
+        side_effect=tool_def.get("side_effect", "read"),
+        read_only_hint=bool(tool_def.get("read_only_hint", True)),
+        approval_default=tool_def.get("approval_default", "never"),
+        visibility=tool_def.get("visibility", "model"),
+        profile_tags=tuple(tool_def.get("profile_tags", [])),
+        openai_summary=tool_def.get("openai_summary", tool_def.get("description", "")),
+        surface=tool_def.get("surface", "tool"),
+        origin=origin,
+    )
+
+
+def get_static_tool_catalog() -> dict[str, ToolCatalogEntry]:
+    return {
+        name: _catalog_entry_from_tool_def(
+            {
+                "name": name,
+                **meta,
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+            },
+            origin="static",
+        )
+        for name, meta in STATIC_TOOL_METADATA.items()
+    }
+
+
+class HydrationCache:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._raw_schema: dict | None = None
+        self._catalog: ToolCatalog | None = None
+        self._fingerprint: tuple | None = None
+
+    async def get_catalog_async(self, force_refresh: bool = False) -> ToolCatalog:
+        async with self._lock:
+            if self._catalog is not None and not force_refresh:
+                return self._catalog
+            raw = _fetch_remote_schema()
+            fingerprint = self._fingerprint_for(raw)
+            if (
+                not force_refresh
+                and self._catalog is not None
+                and self._fingerprint == fingerprint
+            ):
+                return self._catalog
+            self._raw_schema = raw
+            self._fingerprint = fingerprint
+            self._catalog = ToolCatalog.from_schema(raw, get_static_tool_catalog())
+            return self._catalog
+
+    def get_catalog(self, force_refresh: bool = False) -> ToolCatalog:
+        if self._catalog is not None and not force_refresh:
+            return self._catalog
+        raw = _fetch_remote_schema()
+        fingerprint = self._fingerprint_for(raw)
+        if (
+            not force_refresh
+            and self._catalog is not None
+            and self._fingerprint == fingerprint
+        ):
+            return self._catalog
+        self._raw_schema = raw
+        self._fingerprint = fingerprint
+        self._catalog = ToolCatalog.from_schema(raw, get_static_tool_catalog())
+        return self._catalog
+
+    @staticmethod
+    def _fingerprint_for(raw: dict) -> tuple:
+        return (
+            raw.get("schema_version", SCHEMA_VERSION),
+            raw.get("count", len(raw.get("tools", []))),
+            tuple(sorted(tool.get("path", "") for tool in raw.get("tools", []))),
+        )
+
+    def update(self, raw: dict):
+        self._raw_schema = raw
+        self._fingerprint = self._fingerprint_for(raw)
+        self._catalog = ToolCatalog.from_schema(raw, get_static_tool_catalog())
+        return self._catalog
+
+
+def _fetch_remote_schema() -> dict:
+    text, status = do_request("GET", "/mcp/schema", timeout=10)
+    if status != 200:
+        raise RuntimeError(f"Failed to fetch schema: HTTP {status}")
+    return json.loads(text)
+
 
 def _parse_schema(raw: dict) -> list[dict]:
-    """Convert upstream AnnotationScanner schema to internal tool defs.
-
-    Upstream format: {"tools": [{"path", "method", "description", "category", "params": [...]}]}
-    Internal format: [{"name", "endpoint", "http_method", "description", "category", "input_schema"}]
-    """
+    """Convert upstream AnnotationScanner schema to internal tool defs."""
     tool_defs = []
     for tool in raw.get("tools", []):
         path = tool["path"]
         name = path.lstrip("/")
+        method = _normalize_method(tool.get("method", "GET"))
+        category = _normalize_category(tool.get("category", "unknown"))
         params = tool.get("params", [])
 
         properties = {}
@@ -596,23 +1023,46 @@ def _parse_schema(raw: dict) -> list[dict]:
                 pdef["description"] = p["description"]
             if "default" in p and p["default"] is not None:
                 pdef["default"] = p["default"]
+            if p.get("param_type"):
+                pdef["paramType"] = p["param_type"]
             properties[p["name"]] = pdef
             if p.get("required", False):
                 required.append(p["name"])
 
+        title = tool.get("title", _derive_title(path))
+        side_effect = _derive_side_effect(method, category, tool.get("side_effect"))
         tool_defs.append(
             {
                 "name": name,
                 "endpoint": path,
-                "http_method": tool.get("method", "GET"),
+                "http_method": method,
                 "description": tool.get("description", ""),
-                "category": tool.get("category", "unknown"),
+                "category": category,
                 "category_description": tool.get("category_description", ""),
                 "input_schema": {
                     "type": "object",
                     "properties": properties,
                     "required": required,
                 },
+                "title": title,
+                "tags": _derive_tags(category, method, side_effect, tool.get("tags")),
+                "side_effect": side_effect,
+                "read_only_hint": _derive_read_only_hint(
+                    side_effect, tool.get("read_only_hint")
+                ),
+                "approval_default": _derive_approval_default(
+                    method, category, tool.get("approval_default")
+                ),
+                "visibility": _derive_visibility(tool.get("visibility")),
+                "profile_tags": _derive_profile_tags(
+                    category, tool.get("profile_tags")
+                ),
+                "openai_summary": _derive_openai_summary(
+                    tool.get("description", ""),
+                    title,
+                    tool.get("openai_summary"),
+                ),
+                "surface": tool.get("surface", "tool"),
             }
         )
 
@@ -637,13 +1087,57 @@ STATIC_TOOL_NAMES = {
 _dynamic_tool_names: list[str] = []
 _full_schema: list[dict] = []  # Complete parsed schema
 _loaded_groups: set[str] = set()
+_tool_policy = ToolPolicy()
+_hydration_cache = HydrationCache()
 
 # Core groups always loaded on connect (essential for basic RE workflow)
 CORE_GROUPS = {"listing", "function", "program"}
 
 # CLI-configurable: --lazy keeps only default groups, otherwise load all
-_lazy_mode = True  # default: lazy (only load default groups on connect)
+_lazy_mode = True
 _default_groups: set[str] = CORE_GROUPS
+
+
+def _policy_for(policy: ToolPolicy | None) -> ToolPolicy:
+    return policy if policy is not None else _tool_policy
+
+
+def _tool_is_visible(tool_def: dict, policy: ToolPolicy) -> bool:
+    return policy.matches(_catalog_entry_from_tool_def(tool_def, origin="dynamic"))
+
+
+def _register_static_tool(name: str):
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    if not isinstance(tools, dict):
+        return
+    if name in tools:
+        return
+    func = globals().get(name)
+    entry = get_static_tool_catalog().get(name)
+    if callable(func) and entry is not None:
+        mcp.tool(name=name, description=entry.openai_summary)(func)
+
+
+def _apply_static_tool_policy(policy: ToolPolicy | None = None):
+    effective_policy = _policy_for(policy)
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    if not isinstance(tools, dict):
+        return
+    static_catalog = get_static_tool_catalog()
+    allowed = set(ALWAYS_VISIBLE_TOOLS)
+    for name, entry in static_catalog.items():
+        if name in ALWAYS_VISIBLE_TOOLS:
+            continue
+        if effective_policy.matches(entry):
+            allowed.add(name)
+
+    for name in list(STATIC_TOOL_NAMES):
+        if name in allowed:
+            _register_static_tool(name)
+        else:
+            tools.pop(name, None)
 
 
 def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
@@ -700,7 +1194,7 @@ def _register_tool_def(tool_def: dict) -> bool:
     name = tool_def["name"]
     if name in STATIC_TOOL_NAMES:
         return False  # Don't overwrite static tools
-    description = tool_def.get("description", "")
+    description = tool_def.get("openai_summary") or tool_def.get("description", "")
     endpoint = tool_def["endpoint"]
     http_method = tool_def.get("http_method", "GET")
     input_schema = tool_def.get("input_schema", {"type": "object", "properties": {}})
@@ -715,17 +1209,19 @@ def _register_tool_def(tool_def: dict) -> bool:
 
 
 def register_tools_from_schema(
-    schema: list[dict], groups: set[str] | None = None
+    schema: list[dict], groups: set[str] | None = None, policy: ToolPolicy | None = None
 ) -> int:
     """Register MCP tools from parsed schema.
 
     Args:
         schema: List of parsed tool definitions.
         groups: If provided, only register tools in these groups. None = register all.
+        policy: Additional visibility filter for OpenAI-first routing.
 
     Returns: count of registered tools.
     """
     global _dynamic_tool_names, _full_schema, _loaded_groups
+    effective_policy = _policy_for(policy)
 
     # Remove previously registered dynamic tools
     for name in _dynamic_tool_names:
@@ -744,9 +1240,13 @@ def register_tools_from_schema(
         category = tool_def.get("category", "unknown")
         if groups is not None and category not in groups:
             continue
-        _register_tool_def(tool_def)
-        _loaded_groups.add(category)
-        count += 1
+        if not _tool_is_visible(tool_def, effective_policy):
+            continue
+        if _register_tool_def(tool_def):
+            _loaded_groups.add(category)
+            count += 1
+
+    _apply_static_tool_policy(effective_policy)
 
     return count
 
@@ -754,12 +1254,15 @@ def register_tools_from_schema(
 def _load_group(group_name: str) -> list[str]:
     """Load tools for a specific group from cached schema. Returns list of newly loaded tool names."""
     loaded_names: list[str] = []
+    effective_policy = _policy_for(None)
     for tool_def in _full_schema:
         if tool_def.get("category") != group_name:
             continue
         name = tool_def["name"]
         if name in _dynamic_tool_names:
             continue  # Already loaded
+        if not _tool_is_visible(tool_def, effective_policy):
+            continue
         _register_tool_def(tool_def)
         loaded_names.append(name)
     if loaded_names:
@@ -794,24 +1297,32 @@ def _unload_group(group_name: str) -> int:
 def _get_group_info() -> list[dict]:
     """Get info about all tool groups from cached schema."""
     groups: dict[str, list[str]] = {}
+    visible_groups: dict[str, list[str]] = {}
     descriptions: dict[str, str] = {}
+    effective_policy = _policy_for(None)
     for tool_def in _full_schema:
         cat = tool_def.get("category", "unknown")
         groups.setdefault(cat, []).append(tool_def["name"])
+        if _tool_is_visible(tool_def, effective_policy):
+            visible_groups.setdefault(cat, []).append(tool_def["name"])
         if cat not in descriptions and tool_def.get("category_description"):
             descriptions[cat] = tool_def["category_description"]
 
     result = []
     for name, tools in sorted(groups.items()):
+        visible = sorted(visible_groups.get(name, []))
         info: dict = {
             "group": name,
             "tool_count": len(tools),
+            "visible_tool_count": len(visible),
             "loaded": name in _loaded_groups,
             "default": name in _default_groups,
         }
         if name in descriptions:
             info["description"] = descriptions[name]
-        info["tools"] = sorted(tools)
+        if visible and len(visible) != len(tools):
+            info["hidden_tool_count"] = len(tools) - len(visible)
+        info["tools"] = visible
         result.append(info)
     return result
 
@@ -826,13 +1337,16 @@ def _fetch_and_register_schema(load_all: bool = False) -> int:
     """
     if not load_all:
         load_all = not _lazy_mode
-    text, status = do_request("GET", "/mcp/schema", timeout=10)
-    if status != 200:
-        raise RuntimeError(f"Failed to fetch schema: HTTP {status}")
-    raw = json.loads(text)
+    raw = _fetch_remote_schema()
+    _hydration_cache.update(raw)
     schema = _parse_schema(raw)
     groups = None if load_all else _default_groups
-    return register_tools_from_schema(schema, groups=groups)
+    return register_tools_from_schema(schema, groups=groups, policy=_tool_policy)
+
+
+def export_allowed_tools(policy: ToolPolicy) -> list[str]:
+    catalog = _hydration_cache.get_catalog()
+    return catalog.filter(policy)
 
 
 async def _notify_tools_changed(ctx: Context | None) -> None:
@@ -1260,7 +1774,7 @@ def _auto_connect():
 
 
 def main():
-    global _lazy_mode, _default_groups
+    global _lazy_mode, _default_groups, _tool_policy
 
     parser = argparse.ArgumentParser(
         description="GhidraMCP Bridge — MCP↔HTTP multiplexer"
@@ -1286,14 +1800,14 @@ def main():
     parser.add_argument(
         "--lazy",
         action="store_true",
-        default=False,
-        help="Only load default tool groups on connect (not recommended for Claude Code)",
+        default=True,
+        help="Only load default tool groups on connect (default, recommended for OpenAI-first hosts)",
     )
     parser.add_argument(
         "--no-lazy",
         dest="lazy",
         action="store_false",
-        help="Load all tool groups on connect (default)",
+        help="Load all tool groups on connect",
     )
     parser.add_argument(
         "--default-groups",
@@ -1302,6 +1816,44 @@ def main():
         help="Comma-separated list of default tool groups to load on connect "
         "(default: listing,function,program)",
     )
+    parser.add_argument(
+        "--profile",
+        action="append",
+        choices=sorted(TOOL_PROFILES.keys()),
+        help="Profile tag filter for visible tools (repeatable)",
+    )
+    parser.add_argument(
+        "--category",
+        action="append",
+        help="Category filter for visible tools (repeatable)",
+    )
+    parser.add_argument(
+        "--tag",
+        action="append",
+        help="Tag filter for visible tools (repeatable)",
+    )
+    parser.add_argument(
+        "--read-only-only",
+        action="store_true",
+        help="Expose only tools marked as read-only",
+    )
+    parser.add_argument(
+        "--allow-tools-file",
+        type=str,
+        help="Path to JSON array/object or newline-delimited allowlist of tool names",
+    )
+    parser.add_argument(
+        "--approval-mode",
+        type=str,
+        default="never",
+        choices=["never", "required", "all"],
+        help="Visibility policy by approval class (default: never)",
+    )
+    parser.add_argument(
+        "--export-allowlist",
+        type=str,
+        help="Write the filtered tool allowlist to a file (use '-' for stdout) and exit",
+    )
     args = parser.parse_args()
 
     _lazy_mode = args.lazy
@@ -1309,12 +1861,61 @@ def main():
         _default_groups = {
             g.strip() for g in args.default_groups.split(",") if g.strip()
         }
+    elif args.category:
+        _default_groups = _default_groups | {
+            g.strip().lower() for g in args.category if g.strip()
+        }
+
+    allowlist: set[str] = set()
+    if args.allow_tools_file:
+        raw_allowlist = Path(args.allow_tools_file).read_text(encoding="utf-8").strip()
+        if raw_allowlist:
+            try:
+                parsed_allowlist = json.loads(raw_allowlist)
+            except json.JSONDecodeError:
+                allowlist = {
+                    line.strip() for line in raw_allowlist.splitlines() if line.strip()
+                }
+            else:
+                if isinstance(parsed_allowlist, list):
+                    allowlist = {
+                        str(item).strip()
+                        for item in parsed_allowlist
+                        if str(item).strip()
+                    }
+                elif isinstance(parsed_allowlist, dict):
+                    values = parsed_allowlist.get("allowed_tools", [])
+                    allowlist = {
+                        str(item).strip() for item in values if str(item).strip()
+                    }
+
+    _tool_policy = ToolPolicy(
+        profiles={item.strip() for item in (args.profile or []) if item.strip()},
+        categories={
+            item.strip().lower() for item in (args.category or []) if item.strip()
+        },
+        tags={item.strip().lower() for item in (args.tag or []) if item.strip()},
+        read_only_only=args.read_only_only,
+        approval_mode=args.approval_mode,
+        allowlist=allowlist,
+    )
+    _apply_static_tool_policy(_tool_policy)
 
     if not _lazy_mode:
         logger.info(
             "Loading all tool groups on startup (clients that don't support tools/list_changed need this)"
         )
     _auto_connect()
+
+    if args.export_allowlist:
+        allowed = export_allowed_tools(_tool_policy)
+        payload = json.dumps({"allowed_tools": allowed}, indent=2)
+        if args.export_allowlist == "-":
+            print(payload)
+        else:
+            Path(args.export_allowlist).write_text(payload + "\n", encoding="utf-8")
+        logger.info("Exported %d allowed tools", len(allowed))
+        return
 
     mcp.settings.log_level = "INFO"
     mcp.settings.host = args.mcp_host

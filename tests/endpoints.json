@@ -18,6 +18,25 @@
     "script": "Script execution",
     "utility": "Utility endpoints"
   },
+  "schema_catalog": {
+    "schema_version": "2.0",
+    "capabilities": {
+      "catalog_metadata": true,
+      "tool_filtering": true,
+      "lazy_hydration_hints": true
+    },
+    "default_approval": {
+      "GET": "never",
+      "POST": "required"
+    },
+    "high_risk_categories": [
+      "project",
+      "server",
+      "script",
+      "process",
+      "debugger"
+    ]
+  },
   "endpoints": [
     {
       "path": "/check_connection",

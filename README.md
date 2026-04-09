@@ -189,6 +189,27 @@ v5.0 moves conventions from "things to remember" into the tool layer, where they
 python bridge_mcp_ghidra.py
 ```
 
+#### OpenAI-First Exposure
+By default the bridge now starts in a smaller, OpenAI-friendly mode:
+- only the default tool groups are loaded on connect
+- tools marked `approval_default=required` stay hidden unless you opt in
+- static bridge control-plane tools stay available so the client can connect and load more groups
+
+Useful flags:
+```bash
+# expose only reverse-engineering tools that default to no approval
+python bridge_mcp_ghidra.py --profile re --approval-mode never
+
+# keep the small default catalog but further restrict to read-only tools
+python bridge_mcp_ghidra.py --profile re --approval-mode never --read-only-only
+
+# export the currently visible tool names as an allowlist payload
+python bridge_mcp_ghidra.py --profile re --approval-mode never --export-allowlist allowed-tools.json
+
+# opt back into the legacy "load everything" behavior
+python bridge_mcp_ghidra.py --no-lazy --approval-mode all
+```
+
 #### Option 2: Streamable HTTP Transport (Recommended for web/HTTP clients)
 ```bash
 python bridge_mcp_ghidra.py --transport streamable-http --mcp-host 127.0.0.1 --mcp-port 8081

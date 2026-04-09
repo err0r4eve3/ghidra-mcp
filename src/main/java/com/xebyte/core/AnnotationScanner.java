@@ -33,6 +33,8 @@ public class AnnotationScanner {
 
     private static final Logger LOG = Logger.getLogger(AnnotationScanner.class.getName());
     private static final String NO_DEFAULT = Param.NO_DEFAULT;
+    private static final Set<String> HIGH_RISK_CATEGORIES =
+        Set.of("debugger", "project", "server", "script", "process");
 
     private final List<EndpointDef> endpoints = new ArrayList<>();
     private final List<ToolDescriptor> descriptors = new ArrayList<>();
@@ -64,7 +66,13 @@ public class AnnotationScanner {
     /** Generate a JSON schema string describing all discovered tools. */
     public String generateSchema() {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"tools\": [");
+        sb.append("{\"schema_version\": ").append(jsonStr("2.0"));
+        sb.append(", \"capabilities\": {");
+        sb.append("\"catalog_metadata\": true");
+        sb.append(", \"tool_filtering\": true");
+        sb.append(", \"lazy_hydration_hints\": true");
+        sb.append("}");
+        sb.append(", \"tools\": [");
         for (int i = 0; i < descriptors.size(); i++) {
             if (i > 0) sb.append(", ");
             sb.append(descriptors.get(i).toJson());
@@ -322,8 +330,36 @@ public class AnnotationScanner {
                 binding.param.paramType()    // NEW
             ));
         }
-        return new ToolDescriptor(tool.path(), tool.method(), tool.description(),
-            category, categoryDescription, params);
+        String normalizedMethod = normalizeMethod(tool.method());
+        String normalizedCategory = normalizeCategory(category);
+        String description = tool.description();
+        String title = deriveTitle(tool, tool.path());
+        String sideEffect = deriveSideEffect(tool, normalizedMethod, normalizedCategory);
+        boolean readOnlyHint = deriveReadOnlyHint(tool, sideEffect);
+        String approvalDefault = deriveApprovalDefault(
+            tool, normalizedMethod, normalizedCategory
+        );
+        String visibility = deriveVisibility(tool);
+        List<String> tags = deriveTags(tool, normalizedMethod, normalizedCategory, sideEffect);
+        List<String> profileTags = deriveProfileTags(tool, normalizedCategory);
+        String openaiSummary = deriveOpenaiSummary(tool, title, description);
+        return new ToolDescriptor(
+            tool.path(),
+            normalizedMethod,
+            description,
+            normalizedCategory,
+            categoryDescription,
+            params,
+            title,
+            tags,
+            sideEffect,
+            readOnlyHint,
+            approvalDefault,
+            visibility,
+            profileTags,
+            openaiSummary,
+            "tool"
+        );
     }
 
     private static String jsonType(Class<?> type, boolean fieldsJson) {
@@ -338,13 +374,141 @@ public class AnnotationScanner {
         return "string";
     }
 
+    private static String normalizeMethod(String method) {
+        if (method == null || method.isBlank()) {
+            return "GET";
+        }
+        return method.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private static String normalizeCategory(String category) {
+        if (category == null) {
+            return "";
+        }
+        return category.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String deriveSideEffect(McpTool tool, String method, String category) {
+        if (!tool.sideEffect().isBlank()) {
+            return tool.sideEffect().trim().toLowerCase(Locale.ROOT);
+        }
+        if ("POST".equals(method)) {
+            return "write";
+        }
+        if ("debugger".equals(category)) {
+            return "read";
+        }
+        return "read";
+    }
+
+    private static boolean deriveReadOnlyHint(McpTool tool, String sideEffect) {
+        if (!tool.readOnlyHint().isBlank()) {
+            return Boolean.parseBoolean(tool.readOnlyHint().trim());
+        }
+        return "read".equals(sideEffect);
+    }
+
+    private static String deriveApprovalDefault(McpTool tool, String method, String category) {
+        if (!tool.approvalDefault().isBlank()) {
+            return tool.approvalDefault().trim().toLowerCase(Locale.ROOT);
+        }
+        if (HIGH_RISK_CATEGORIES.contains(category)) {
+            return "required";
+        }
+        return "POST".equals(method) ? "required" : "never";
+    }
+
+    private static String deriveVisibility(McpTool tool) {
+        if (!tool.visibility().isBlank()) {
+            return tool.visibility().trim().toLowerCase(Locale.ROOT);
+        }
+        return "model";
+    }
+
+    private static String deriveTitle(McpTool tool, String path) {
+        if (!tool.title().isBlank()) {
+            return tool.title().trim();
+        }
+        String raw = path == null ? "" : path.replaceFirst("^/", "")
+            .replace('_', ' ')
+            .replace('/', ' ');
+        String[] parts = raw.trim().split("\\s+");
+        StringBuilder title = new StringBuilder();
+        for (String part : parts) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            if (title.length() > 0) {
+                title.append(' ');
+            }
+            title.append(Character.toUpperCase(part.charAt(0)));
+            if (part.length() > 1) {
+                title.append(part.substring(1));
+            }
+        }
+        return title.toString();
+    }
+
+    private static List<String> deriveTags(
+        McpTool tool,
+        String method,
+        String category,
+        String sideEffect
+    ) {
+        LinkedHashSet<String> tags = new LinkedHashSet<>();
+        if (!category.isBlank()) {
+            tags.add(category);
+        }
+        tags.add(method.toLowerCase(Locale.ROOT));
+        tags.add(sideEffect);
+        for (String tag : tool.tags()) {
+            if (tag != null && !tag.isBlank()) {
+                tags.add(tag.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return List.copyOf(tags);
+    }
+
+    private static List<String> deriveProfileTags(McpTool tool, String category) {
+        LinkedHashSet<String> tags = new LinkedHashSet<>();
+        for (String tag : tool.profileTags()) {
+            if (tag != null && !tag.isBlank()) {
+                tags.add(tag.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        if (tags.isEmpty() && !HIGH_RISK_CATEGORIES.contains(category)) {
+            tags.add("re");
+        }
+        return List.copyOf(tags);
+    }
+
+    private static String deriveOpenaiSummary(McpTool tool, String title, String description) {
+        if (!tool.openaiSummary().isBlank()) {
+            return tool.openaiSummary().trim();
+        }
+        if (description != null && !description.isBlank()) {
+            return "Use this when you need to " + lowerCaseFirst(description.trim());
+        }
+        return "Use this when you need " + title.toLowerCase(Locale.ROOT) + ".";
+    }
+
+    private static String lowerCaseFirst(String value) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        return Character.toLowerCase(value.charAt(0)) + value.substring(1);
+    }
+
     // ==================================================================
     // Descriptor records
     // ==================================================================
 
     /** Describes an MCP tool for schema generation. */
     public record ToolDescriptor(String path, String method, String description,
-            String category, String categoryDescription, List<ParamDescriptor> params) {
+            String category, String categoryDescription, List<ParamDescriptor> params,
+            String title, List<String> tags, String sideEffect, boolean readOnlyHint,
+            String approvalDefault, String visibility, List<String> profileTags,
+            String openaiSummary, String surface) {
 
         /** Serialize to JSON. */
         public String toJson() {
@@ -360,6 +524,17 @@ public class AnnotationScanner {
             if (categoryDescription != null && !categoryDescription.isEmpty()) {
                 sb.append(", \"category_description\": ").append(jsonStr(categoryDescription));
             }
+            if (title != null && !title.isEmpty()) {
+                sb.append(", \"title\": ").append(jsonStr(title));
+            }
+            sb.append(", \"tags\": ").append(jsonArray(tags));
+            sb.append(", \"side_effect\": ").append(jsonStr(sideEffect));
+            sb.append(", \"read_only_hint\": ").append(readOnlyHint);
+            sb.append(", \"approval_default\": ").append(jsonStr(approvalDefault));
+            sb.append(", \"visibility\": ").append(jsonStr(visibility));
+            sb.append(", \"profile_tags\": ").append(jsonArray(profileTags));
+            sb.append(", \"openai_summary\": ").append(jsonStr(openaiSummary));
+            sb.append(", \"surface\": ").append(jsonStr(surface));
             sb.append(", \"params\": [");
             for (int i = 0; i < params.size(); i++) {
                 if (i > 0) sb.append(", ");
@@ -398,6 +573,19 @@ public class AnnotationScanner {
     private static String jsonStr(String s) {
         if (s == null) return "null";
         return "\"" + ServiceUtils.escapeJson(s) + "\"";
+    }
+
+    private static String jsonArray(List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(jsonStr(values.get(i)));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     // ==================================================================

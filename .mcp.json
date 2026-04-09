@@ -4,7 +4,10 @@
       "command": "python",
       "args": [
         "c:/Users/benam/source/mcp/ghidra-mcp/bridge_mcp_ghidra.py",
-        "--no-lazy"
+        "--profile",
+        "re",
+        "--approval-mode",
+        "never"
       ],
       "env": {
         "GHIDRA_SERVER_URL": "http://127.0.0.1:8089/"

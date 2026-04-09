@@ -3,7 +3,11 @@
         "ghidra-mcp": {
             "command": "python",
             "args": [
-                "bridge_mcp_ghidra.py"
+                "bridge_mcp_ghidra.py",
+                "--profile",
+                "re",
+                "--approval-mode",
+                "never"
             ],
             "env": {
                 "GHIDRA_SERVER_URL": "http://127.0.0.1:8089/"
