@@ -35,4 +35,40 @@ public @interface McpTool {
 
     /** Tool category for grouping (e.g., "listing", "function", "analysis"). */
     String category() default "";
+
+    /** Optional short title for directory/catalog UIs. */
+    String title() default "";
+
+    /** Optional tags for routing and allowlist generation. */
+    String[] tags() default {};
+
+    /**
+     * Optional side-effect classification.
+     * Expected values: "read", "write", "execute", or empty for derived defaults.
+     */
+    String sideEffect() default "";
+
+    /**
+     * Optional read-only hint override.
+     * Expected values: "", "true", or "false".
+     */
+    String readOnlyHint() default "";
+
+    /**
+     * Optional approval default override.
+     * Expected values: "", "never", or "required".
+     */
+    String approvalDefault() default "";
+
+    /**
+     * Optional visibility override for host-side routing.
+     * Expected values: "", "model", or "app".
+     */
+    String visibility() default "";
+
+    /** Optional profile tags used by bridge-side filtering (e.g., "re"). */
+    String[] profileTags() default {};
+
+    /** Optional OpenAI-oriented short summary. */
+    String openaiSummary() default "";
 }

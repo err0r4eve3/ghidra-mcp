@@ -5,7 +5,11 @@
       "args": [
         "bridge_mcp_ghidra.py",
         "--transport",
-        "stdio"
+        "stdio",
+        "--profile",
+        "re",
+        "--approval-mode",
+        "never"
       ],
       "env": {
         "GHIDRA_MCP_URL": "http://127.0.0.1:8089",

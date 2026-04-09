@@ -19,6 +19,25 @@
     "utility": "Utility endpoints",
     "emulation": "P-code emulation (run functions with controlled inputs)"
   },
+  "schema_catalog": {
+    "schema_version": "2.0",
+    "capabilities": {
+      "catalog_metadata": true,
+      "tool_filtering": true,
+      "lazy_hydration_hints": true
+    },
+    "default_approval": {
+      "GET": "never",
+      "POST": "required"
+    },
+    "high_risk_categories": [
+      "project",
+      "server",
+      "script",
+      "process",
+      "debugger"
+    ]
+  },
   "endpoints": [
     {
       "path": "/add_struct_field",
