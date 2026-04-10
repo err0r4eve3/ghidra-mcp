@@ -120,6 +120,34 @@ class TestGetTimeout(unittest.TestCase):
         self.assertGreater(timeout, 120)
 
 
+class TestHttpTransportConnectionLifecycle(unittest.TestCase):
+    """Test one-shot HTTP connection handling."""
+
+    def test_server_url_accepts_host_port_without_scheme(self):
+        from bridge_mcp_ghidra import normalize_server_url, validate_server_url
+
+        self.assertEqual(
+            normalize_server_url(" 127.0.0.1:8089 "), "http://127.0.0.1:8089"
+        )
+        self.assertTrue(validate_server_url("127.0.0.1:8089"))
+        self.assertTrue(validate_server_url("http://127.0.0.1:8089"))
+
+    @patch("bridge_mcp_ghidra.http.client.HTTPConnection")
+    def test_tcp_request_asks_server_to_close_connection(self, mock_connection):
+        from bridge_mcp_ghidra import tcp_request
+
+        response = mock_connection.return_value.getresponse.return_value
+        response.read.return_value = b"ok"
+        response.status = 200
+
+        text, status = tcp_request("http://127.0.0.1:8089", "GET", "/check_connection")
+
+        self.assertEqual((text, status), ("ok", 200))
+        headers = mock_connection.return_value.request.call_args.kwargs["headers"]
+        self.assertEqual(headers["Connection"], "close")
+        mock_connection.return_value.close.assert_called()
+
+
 class TestBuildToolFunction(unittest.TestCase):
     """Test dynamic tool function builder."""
 

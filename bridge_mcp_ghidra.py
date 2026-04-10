@@ -230,11 +230,26 @@ def is_pid_alive(pid: int) -> bool:
         raise
 
 
+def normalize_server_url(url: str) -> str:
+    """Normalize server URL, accepting host:port inputs by adding http://."""
+    if not url:
+        return url
+    url = url.strip()
+    if "://" not in url:
+        return f"http://{url}"
+    return url
+
+
 def validate_server_url(url: str) -> bool:
-    """Validate that the server URL is safe to use"""
+    """Validate that the server URL is safe to use."""
     try:
-        parsed = urlparse(url)
-        return parsed.hostname in ("127.0.0.1", "localhost", "::1")
+        normalized = normalize_server_url(url)
+        parsed = urlparse(normalized)
+        host = parsed.hostname
+        if not host and parsed.path:
+            reparsed = urlparse(normalize_server_url(parsed.path))
+            host = reparsed.hostname
+        return host in ("127.0.0.1", "localhost", "::1")
     except Exception:
         return False
 
@@ -306,7 +321,7 @@ def uds_request(
     if params:
         path = f"{path}?{urlencode(params)}"
 
-    headers = {}
+    headers = {"Connection": "close"}
     body = None
     if json_data is not None:
         body = json.dumps(json_data).encode("utf-8")
@@ -319,11 +334,9 @@ def uds_request(
         response = conn.getresponse()
         result = response.read().decode("utf-8")
         status = response.status
-        conn.close()
         return result, status
-    except Exception:
+    finally:
         conn.close()
-        raise
 
 
 # ==========================================================================
@@ -347,7 +360,7 @@ def tcp_request(
     if params:
         path = f"{path}?{urlencode(params)}"
 
-    headers = {}
+    headers = {"Connection": "close"}
     body = None
     if json_data is not None:
         body = json.dumps(json_data).encode("utf-8")
@@ -360,11 +373,9 @@ def tcp_request(
         response = conn.getresponse()
         result = response.read().decode("utf-8")
         status = response.status
-        conn.close()
         return result, status
-    except Exception:
+    finally:
         conn.close()
-        raise
 
 
 # ==========================================================================
@@ -1693,7 +1704,7 @@ async def connect_instance(project: str, ctx: Context | None = None) -> str:
                 )
 
     # Try TCP fallback
-    tcp_url = os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
+    tcp_url = normalize_server_url(os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL))
     if not validate_server_url(tcp_url):
         return json.dumps(
             {
@@ -2004,7 +2015,7 @@ def _auto_connect():
         )
 
     # Try TCP fallback
-    tcp_url = os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
+    tcp_url = normalize_server_url(os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL))
     if not validate_server_url(tcp_url):
         logger.warning(f"Refusing to auto-connect to non-local URL: {tcp_url}")
         return
