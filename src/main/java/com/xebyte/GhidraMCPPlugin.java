@@ -166,6 +166,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
 
     // Static singleton: one HTTP server shared across all CodeBrowser windows (fixes #35)
     private static HttpServer server;
+    private static java.util.concurrent.ExecutorService httpExecutor;
     private static int instanceCount = 0;
     private boolean ownsServer = false; // true if this instance started the server
     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
@@ -318,6 +319,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
             Msg.info(this, "Stopping GhidraMCP HTTP server...");
             try {
                 server.stop(1);
+                shutdownHttpExecutor();
                 Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -431,6 +433,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
             Msg.info(this, "Stopping existing HTTP server before starting new one.");
             try {
                 server.stop(0);
+                shutdownHttpExecutor();
                 // Give the server time to fully stop and release all resources
                 Thread.sleep(500);
             } catch (InterruptedException e) {
@@ -768,7 +771,13 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         }));
 
 
-        server.setExecutor(null);
+        AtomicInteger workerId = new AtomicInteger(1);
+        httpExecutor = java.util.concurrent.Executors.newFixedThreadPool(10, runnable -> {
+            Thread thread = new Thread(runnable, "GhidraMCP-HTTP-Worker-" + workerId.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        });
+        server.setExecutor(httpExecutor);
         new Thread(() -> {
             try {
                 server.start();
@@ -1728,6 +1737,8 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                     // Last resort - response already sent or exchange broken
                     Msg.error(this, "Failed to send error response", ignored);
                 }
+            } finally {
+                exchange.close();
             }
         };
     }
@@ -1741,13 +1752,18 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         Headers headers = exchange.getResponseHeaders();
         headers.set("Content-Type", "text/plain; charset=utf-8");
-        // v1.6.1: Enable HTTP keep-alive for long-running operations
-        headers.set("Connection", "keep-alive");
-        headers.set("Keep-Alive", "timeout=" + HTTP_IDLE_TIMEOUT_SECONDS + ", max=100");
+        headers.set("Connection", "close");
         exchange.sendResponseHeaders(statusCode, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
             os.flush();  // v1.7.2: Explicit flush to ensure response is sent immediately
+        }
+    }
+
+    private static void shutdownHttpExecutor() {
+        if (httpExecutor != null) {
+            httpExecutor.shutdownNow();
+            httpExecutor = null;
         }
     }
 

@@ -211,6 +211,18 @@ class TestAnnotationScannerExists(unittest.TestCase):
         self.assertIn("generateSchema", content)
         self.assertIn("ToolDescriptor", content)
 
+    def test_gui_http_server_uses_bounded_worker_pool(self):
+        content = (JAVA_SRC / "GhidraMCPPlugin.java").read_text(encoding="utf-8")
+        self.assertIn("newFixedThreadPool", content)
+        self.assertIn("GhidraMCP-HTTP-Worker", content)
+        self.assertNotIn("server.setExecutor(null)", content)
+
+    def test_gui_http_server_closes_short_lived_connections(self):
+        content = (JAVA_SRC / "GhidraMCPPlugin.java").read_text(encoding="utf-8")
+        self.assertIn('headers.set("Connection", "close")', content)
+        self.assertIn("exchange.close()", content)
+        self.assertNotIn('headers.set("Connection", "keep-alive")', content)
+
     def test_scanner_has_catalog_metadata_fields(self):
         content = (CORE_SRC / "AnnotationScanner.java").read_text(encoding="utf-8")
         for needle in [
