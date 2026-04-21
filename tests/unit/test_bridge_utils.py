@@ -52,6 +52,15 @@ class TestIsPidAlive(unittest.TestCase):
         self.assertFalse(is_pid_alive(4000000))
 
 
+class TestValidateServerUrl(unittest.TestCase):
+    """Test local-only TCP URL validation."""
+
+    def test_allows_localhost_loopback_url(self):
+        from bridge_mcp_ghidra import validate_server_url
+
+        self.assertTrue(validate_server_url("http://127.0.0.1:8089"))
+
+
 class TestGetTimeout(unittest.TestCase):
     """Test per-endpoint timeout calculation."""
 

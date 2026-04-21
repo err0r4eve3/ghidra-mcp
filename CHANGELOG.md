@@ -15,6 +15,7 @@ Complete version history for the Ghidra MCP Server project.
 
 - **read_memory OOM** (#107) — Capped read_memory allocation at 16 MB to prevent out-of-memory on malicious/large length values.
 - **SSRF in connect_instance** (#106) — Wired `validate_server_url()` into `connect_instance` and `_auto_connect` TCP paths.
+- **Local TCP fallback regression** — Restored `urlparse` import in `bridge_mcp_ghidra.py` so `validate_server_url()` accepts loopback URLs like `http://127.0.0.1:8089` instead of rejecting all TCP fallback connections.
 
 ---
 
