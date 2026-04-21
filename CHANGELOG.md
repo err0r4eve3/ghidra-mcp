@@ -728,6 +728,7 @@ The fun-doc automation engine was substantially rebuilt. It now ships a real-tim
 - **read_memory OOM** (#107) — Capped `read_memory` allocation at 16 MB to prevent out-of-memory on malicious/large length values.
 - **SSRF in connect_instance** (#106) — Wired `validate_server_url()` into `connect_instance` and `_auto_connect` TCP paths.
 - **urlparse import** (#113) — `validate_server_url()` used `urlparse` but it was only imported inside `tcp_request()`. The bare `except` silently swallowed the `NameError`, causing all connections to fail. Moved import to module scope.
+- **Windows bridge discovery invalid-PID handling** — `is_pid_alive()` treats Windows `WinError 87` as a dead PID instead of crashing discovery helpers/tests.
 - **LoadResults.save() signature** — Corrected to match Ghidra 12.0.3 API (takes `TaskMonitor` only). Fixes Docker build and compilation errors (#103, #104).
 - **Program param standardization** — All `@Param("program")` annotations now use `QUERY` source consistently. Fixes batch operations that failed when `program` was sent in POST body.
 - **import_file "Database is closed"** — Fixed race condition in program import flow.
