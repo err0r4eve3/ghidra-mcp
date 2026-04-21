@@ -27,7 +27,7 @@ import time
 import http.client
 import inspect
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.lowlevel.server import NotificationOptions
@@ -166,6 +166,10 @@ def is_pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # Running but owned by another user
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 87:
+            return False
+        raise
 
 
 def validate_server_url(url: str) -> bool:

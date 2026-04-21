@@ -15,6 +15,7 @@ Complete version history for the Ghidra MCP Server project.
 
 - **read_memory OOM** (#107) — Capped read_memory allocation at 16 MB to prevent out-of-memory on malicious/large length values.
 - **SSRF in connect_instance** (#106) — Wired `validate_server_url()` into `connect_instance` and `_auto_connect` TCP paths.
+- **Windows bridge discovery regressions** — Restored `urlparse` import for `validate_server_url()`, so loopback URLs like `http://127.0.0.1:8089` are accepted again by `_auto_connect()` and `connect_instance()`. Also handle Windows `WinError 87` in `is_pid_alive()` so invalid PIDs are treated as dead instead of crashing discovery helpers/tests.
 
 ---
 
