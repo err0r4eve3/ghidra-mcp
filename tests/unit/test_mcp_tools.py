@@ -71,10 +71,10 @@ class TestStaticTools(unittest.TestCase):
 class TestToolGroupManagement(unittest.TestCase):
     """Test tool group management tools."""
 
-    def test_lazy_loading_disabled_by_default(self):
+    def test_lazy_loading_enabled_by_default(self):
         import bridge_mcp_ghidra as bridge
 
-        self.assertFalse(bridge._lazy_mode)
+        self.assertTrue(bridge._lazy_mode)
 
     def test_list_tool_groups_registered(self):
         import bridge_mcp_ghidra as bridge
